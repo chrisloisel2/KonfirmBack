@@ -1,0 +1,640 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+  // Note: Prisma 7+ uses prisma.config.ts for datasource URL in migrations,
+  // but the url field is still required for the Prisma client direct connection.
+}
+
+// ─── Enums ───────────────────────────────────────────────────────────────────
+
+enum SubscriptionPlan {
+  STARTER
+  BUSINESS
+  ENTERPRISE
+}
+
+enum SubscriptionStatus {
+  TRIAL
+  ACTIVE
+  EXPIRED
+  SUSPENDED
+}
+
+enum UserRole {
+  CONSEILLER
+  CAISSE
+  REFERENT
+  RESPONSABLE
+  ADMIN
+}
+
+enum DossierStatus {
+  BROUILLON
+  EN_COURS
+  ATTENTE_VALIDATION
+  VALIDE
+  REJETE
+  ARCHIVE
+}
+
+enum DocumentType {
+  IDENTITE
+  JUSTIFICATIF_DOMICILE
+  JUSTIFICATIF_REVENUS
+  RIB
+  ATTESTATION_EMPLOYEUR
+  AUTRES
+}
+
+enum RechercheType {
+  PPE
+  SANCTIONS
+  ASSET_FREEZE
+}
+
+enum RechercheStatus {
+  EN_COURS
+  TERMINE
+  ERREUR
+  EN_ATTENTE_VALIDATION
+}
+
+enum ExceptionType {
+  PPE_DETECTION
+  SANCTIONS_DETECTION
+  ASSET_FREEZE_DETECTION
+  SCORING_ELEVE
+  DONNEES_INCOMPLETES
+  VERIFICATION_MANUELLE
+  AUTRE
+}
+
+enum ExceptionStatus {
+  EN_ATTENTE
+  EN_COURS_TRAITEMENT
+  RESOLUE
+  ESCALADEE
+  VALIDEE
+  REJETEE
+}
+
+enum ScoringLevel {
+  FAIBLE
+  MOYEN
+  ELEVE
+  CRITIQUE
+}
+
+enum AuditAction {
+  CREATE
+  READ
+  UPDATE
+  DELETE
+  LOGIN
+  LOGOUT
+  ACCESS_DENIED
+  EXPORT
+  VALIDATION
+  EXCEPTION_HANDLING
+}
+
+enum TracfinDeclarationStatus {
+  BROUILLON
+  EN_ATTENTE
+  TRANSMISE
+  ARCHIVEE
+}
+
+enum TracfinRisqueLevel {
+  FAIBLE
+  MODERE
+  ELEVE
+  TRES_ELEVE
+}
+
+enum TracfinCritereDomaine {
+  IDENTITE
+  TRANSACTION
+  COMPORTEMENT
+  GEOGRAPHIQUE
+  TEMPOREL
+}
+
+// ─── Modèles principaux ───────────────────────────────────────────────────────
+
+model User {
+  id            String    @id @default(cuid()) @map("_id")
+  email         String    @unique
+  passwordHash  String
+  firstName     String
+  lastName      String
+  role          UserRole
+  isActive      Boolean   @default(true)
+  isBlocked     Boolean   @default(false)
+  lastLogin     DateTime?
+  loginAttempts Int       @default(0)
+  lockedUntil   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  companyId String?
+  shopIds   String[] @default([])
+
+  company             Company?             @relation(fields: [companyId], references: [id])
+  shops               Shop[]               @relation("ShopUsers", fields: [shopIds], references: [id])
+  createdDossiers     Dossier[]           @relation("UserCreatedDossiers")
+  assignedDossiers    Dossier[]           @relation("UserAssignedDossiers")
+  validatedDossiers   Dossier[]           @relation("UserValidatedDossiers")
+  documents           Document[]
+  auditLogs           AuditLog[]
+  exceptions          Exception[]
+  sessions            Session[]
+  tracfinDeclarations TracfinDeclaration[] @relation("TracfinDeclarationCreatedBy")
+  savedSearches       SavedSearch[]
+  searchHistory       SearchHistory[]
+  watchlists          Watchlist[]
+  intelligenceReports IntelligenceReport[]
+  batchSearches       BatchSearch[]
+
+  @@map("users")
+}
+
+model Company {
+  id        String   @id @default(cuid()) @map("_id")
+  name      String
+  siret     String?
+  address   String?
+  city      String?
+  logoUrl   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users        User[]
+  shops        Shop[]
+  subscription Subscription?
+
+  @@map("companies")
+}
+
+model Subscription {
+  id          String             @id @default(cuid()) @map("_id")
+  companyId   String             @unique
+  plan        SubscriptionPlan   @default(STARTER)
+  status      SubscriptionStatus @default(TRIAL)
+  maxAccounts Int                @default(3)
+  maxShops    Int                @default(1)
+  features    String[]           @default([])
+  startDate   DateTime           @default(now())
+  expiresAt   DateTime?
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@map("subscriptions")
+}
+
+model Shop {
+  id        String   @id @default(cuid()) @map("_id")
+  companyId String
+  name      String
+  code      String?
+  address   String?
+  city      String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  userIds String[] @default([])
+
+  company Company @relation(fields: [companyId], references: [id])
+  users   User[]  @relation("ShopUsers", fields: [userIds], references: [id])
+
+  @@unique([companyId, code])
+  @@map("shops")
+}
+
+model Session {
+  id        String   @id @default(cuid()) @map("_id")
+  sessionId String   @unique
+  userId    String
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+  isValid   Boolean  @default(true)
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("sessions")
+}
+
+model Client {
+  id               String   @id @default(cuid()) @map("_id")
+  nom              String
+  prenom           String
+  dateNaissance    DateTime
+  lieuNaissance    String
+  nationalite      String
+  numeroIdentite   String   @unique
+  typeIdentite     String
+  telephone        String?
+  email            String?
+  adresseComplete  String
+  codePostal       String
+  ville            String
+  pays             String   @default("France")
+  profession       String?
+  employeur        String?
+  revenus          Float?
+  patrimoineEstime Float?
+  personnePublique Boolean  @default(false)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  dossiers Dossier[]
+
+  @@map("clients")
+}
+
+model Dossier {
+  id            String        @id @default(cuid()) @map("_id")
+  numero        String        @unique
+  clientId      String
+  createdById   String
+  assignedToId  String?
+  validatedById String?
+  status        DossierStatus @default(BROUILLON)
+  typeOuverture String
+  montantInitial Float?
+  dateOuverture DateTime?
+  notes         String?
+  validation    Json?
+  scoring       Json?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  client      Client    @relation(fields: [clientId], references: [id])
+  createdBy   User      @relation("UserCreatedDossiers", fields: [createdById], references: [id])
+  assignedTo  User?     @relation("UserAssignedDossiers", fields: [assignedToId], references: [id])
+  validatedBy User?     @relation("UserValidatedDossiers", fields: [validatedById], references: [id])
+  documents   Document[]
+  recherches  Recherche[]
+  exceptions  Exception[]
+  auditLogs   AuditLog[]
+  tracfinDeclarations TracfinDeclaration[]
+
+  @@map("dossiers")
+}
+
+model Document {
+  id           String       @id @default(cuid()) @map("_id")
+  dossierId    String
+  uploadedById String
+  fileName     String
+  originalName String
+  fileSize     Int
+  mimeType     String
+  filePath     String
+  type         DocumentType
+  description  String?
+  ocrText      String?
+  ocrMetadata  Json?
+  isVerified   Boolean      @default(false)
+  verifiedAt   DateTime?
+  verifiedById String?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  dossier    Dossier @relation(fields: [dossierId], references: [id])
+  uploadedBy User    @relation(fields: [uploadedById], references: [id])
+
+  @@map("documents")
+}
+
+model Recherche {
+  id          String          @id @default(cuid()) @map("_id")
+  dossierId   String
+  type        RechercheType
+  query       Json
+  response    Json?
+  matches     Json?
+  confidence  Float?
+  status      RechercheStatus @default(EN_COURS)
+  error       String?
+  apiProvider String?
+  executedAt  DateTime        @default(now())
+  completedAt DateTime?
+
+  dossier Dossier @relation(fields: [dossierId], references: [id])
+
+  @@map("recherches")
+}
+
+model Exception {
+  id           String          @id @default(cuid()) @map("_id")
+  dossierId    String
+  type         ExceptionType
+  description  String
+  details      Json?
+  priority     String          @default("NORMALE")
+  status       ExceptionStatus @default(EN_ATTENTE)
+  assignedToId String?
+  resolution   String?
+  resolvedAt   DateTime?
+  escalatedAt  DateTime?
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  dossier    Dossier @relation(fields: [dossierId], references: [id])
+  assignedTo User?   @relation(fields: [assignedToId], references: [id])
+
+  @@map("exceptions")
+}
+
+model Scoring {
+  id             String       @id @default(cuid()) @map("_id")
+  dossierId      String       @unique
+  scoreTotal     Float
+  niveau         ScoringLevel
+  facteurs       Json
+  recommandation String
+  justification  String
+  seuilDecision  Float
+  calculatedAt   DateTime     @default(now())
+
+  @@map("scoring")
+}
+
+model AuditLog {
+  id         String      @id @default(cuid()) @map("_id")
+  userId     String?
+  dossierId  String?
+  action     AuditAction
+  resource   String
+  resourceId String?
+  oldValues  Json?
+  newValues  Json?
+  metadata   Json?
+  ipAddress  String?
+  userAgent  String?
+  timestamp  DateTime    @default(now())
+
+  user    User?    @relation(fields: [userId], references: [id])
+  dossier Dossier? @relation(fields: [dossierId], references: [id])
+
+  @@map("audit_logs")
+}
+
+model Configuration {
+  id          String   @id @default(cuid()) @map("_id")
+  key         String   @unique
+  value       Json
+  description String?
+  category    String   @default("general")
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("configurations")
+}
+
+model ReferenceList {
+  id        String    @id @default(cuid()) @map("_id")
+  type      String
+  code      String?
+  name      String
+  details   Json?
+  source    String?
+  validFrom DateTime?
+  validTo   DateTime?
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@unique([type, code])
+  @@map("reference_lists")
+}
+
+model TracfinDeclaration {
+  id                   String                   @id @default(cuid()) @map("_id")
+  dossierId            String
+  clientNom            String
+  clientPrenom         String
+  clientDateNaissance  String
+  clientNationalite    String
+  clientAdresse        String?
+  montant              Float
+  devise               String                   @default("EUR")
+  dateOperation        DateTime
+  moyenPaiement        String
+  origineGeographique  String?
+  beneficiaire         String?
+  natureSoupcon        String
+  description          String
+  scoreSuspicion       Int
+  criteresSuspicion    Json
+  risqueIdentifie      TracfinRisqueLevel
+  recommendationDSO    Boolean
+  status               TracfinDeclarationStatus @default(BROUILLON)
+  ermesReference       String?
+  transmissionDate     DateTime?
+  createdById          String
+  createdAt            DateTime                 @default(now())
+  updatedAt            DateTime                 @updatedAt
+  lastModifiedAt       DateTime                 @updatedAt
+
+  dossier   Dossier @relation(fields: [dossierId], references: [id])
+  createdBy User    @relation("TracfinDeclarationCreatedBy", fields: [createdById], references: [id])
+
+  @@index([dossierId])
+  @@index([status])
+  @@index([createdAt])
+  @@index([ermesReference])
+  @@map("tracfin_declarations")
+}
+
+// ─── Système de Recherche Ultra-Complet ──────────────────────────────────────
+
+model SavedSearch {
+  id             String   @id @default(cuid()) @map("_id")
+  userId         String
+  name           String
+  description    String?
+  queryParams    Json
+  searchType     String   @default("UNIVERSAL") // UNIVERSAL | ADVANCED | OSINT | BATCH | WATCHLIST
+  lastResultCount Int?
+  lastRunAt      DateTime?
+  isAlertEnabled Boolean  @default(false)
+  alertFrequency String?  // REALTIME | DAILY | WEEKLY | MONTHLY
+  alertThreshold Float?   @default(0.7)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("saved_searches")
+}
+
+model SearchHistory {
+  id           String   @id @default(cuid()) @map("_id")
+  userId       String
+  query        String
+  queryParams  Json
+  resultsCount Int      @default(0)
+  entityTypes  String[]
+  sources      String[]
+  durationMs   Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("search_history")
+}
+
+model Watchlist {
+  id          String   @id @default(cuid()) @map("_id")
+  userId      String
+  name        String
+  description String?
+  color       String?  @default("#3B82F6")
+  isActive    Boolean  @default(true)
+  checkFrequency String @default("DAILY") // REALTIME | HOURLY | DAILY | WEEKLY
+  lastCheckedAt  DateTime?
+  totalAlerts    Int    @default(0)
+  entities    Json[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user   User             @relation(fields: [userId], references: [id])
+  alerts WatchlistAlert[]
+
+  @@map("watchlists")
+}
+
+model WatchlistAlert {
+  id          String   @id @default(cuid()) @map("_id")
+  watchlistId String
+  entityName  String
+  entityType  String
+  entityId    String?
+  alertType   String   // NEW_SANCTIONS | NEW_PPE | ASSET_FREEZE | STATUS_CHANGE | NEW_EXCEPTION | SCORE_INCREASE | NEWS_MENTION
+  severity    String   @default("MEDIUM") // LOW | MEDIUM | HIGH | CRITICAL
+  title       String
+  description String
+  details     Json?
+  sourceUrl   String?
+  isRead      Boolean  @default(false)
+  isActioned  Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  watchlist Watchlist @relation(fields: [watchlistId], references: [id])
+
+  @@map("watchlist_alerts")
+}
+
+model IntelligenceReport {
+  id             String   @id @default(cuid()) @map("_id")
+  userId         String
+  subjectName    String
+  subjectType    String   @default("PERSON") // PERSON | COMPANY | VEHICLE | PROPERTY
+  queryParams    Json
+  sections       Json
+  overallRisk    String?  // FAIBLE | MOYEN | ELEVE | CRITIQUE
+  riskScore      Int?
+  sourcesQueried String[]
+  sourcesHit     String[]
+  totalMatches   Int      @default(0)
+  summary        String?
+  createdAt      DateTime @default(now())
+  expiresAt      DateTime
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("intelligence_reports")
+}
+
+model BatchSearch {
+  id             String   @id @default(cuid()) @map("_id")
+  userId         String
+  name           String
+  searchTypes    String[]
+  totalRecords   Int      @default(0)
+  processedCount Int      @default(0)
+  hitCount       Int      @default(0)
+  status         String   @default("PENDING") // PENDING | RUNNING | COMPLETED | FAILED | CANCELLED
+  errorMessage   String?
+  inputData      Json[]
+  createdAt      DateTime @default(now())
+  completedAt    DateTime?
+
+  user    User               @relation(fields: [userId], references: [id])
+  results BatchSearchResult[]
+
+  @@map("batch_searches")
+}
+
+model BatchSearchResult {
+  id           String   @id @default(cuid()) @map("_id")
+  batchId      String
+  rowIndex     Int
+  inputData    Json
+  hasHit       Boolean  @default(false)
+  riskLevel    String?
+  matches      Json[]
+  sources      String[]
+  confidence   Float?
+  processedAt  DateTime @default(now())
+
+  batch BatchSearch @relation(fields: [batchId], references: [id])
+
+  @@map("batch_search_results")
+}
+
+// ─── Configuration Scoring (KPI + config dashboard) ──────────────────────────
+
+// Profil de configuration global (poids + seuils)
+model ConfigurationScoring {
+  id          String   @id @default(cuid()) @map("_id")
+  nom         String   @unique  // "default", "strict", etc.
+  description String?
+  isActive    Boolean  @default(true)
+
+  // Poids des critères principaux (total doit = 1.0)
+  poidsppe         Float @default(0.4)
+  poidsSanctions   Float @default(0.4)
+  poidsAssetFreeze Float @default(0.2)
+
+  // Seuils de décision (score 0-100)
+  seuilFaible  Float @default(30)  // score < seuilFaible  → FAIBLE
+  seuilMoyen   Float @default(60)  // score < seuilMoyen   → MOYEN
+  seuilEleve   Float @default(85)  // score < seuilEleve   → ELEVE, sinon CRITIQUE
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  facteurs FacteurRisque[]
+
+  @@map("configurations_scoring")
+}
+
+// Facteurs de risque configurables par catégorie et valeur
+model FacteurRisque {
+  id              String  @id @default(cuid()) @map("_id")
+  configurationId String
+  categorie       String  // "profession", "nationalite", "revenus", "age", "paiement", "montant"
+  valeur          String  // "politique", "especes", "above_50k", etc.
+  points          Float   // Points ajoutés au score (0-100)
+  niveau          ScoringLevel? // Niveau minimum déclenché par ce facteur
+  description     String?
+  isActive        Boolean @default(true)
+
+  configuration ConfigurationScoring @relation(fields: [configurationId], references: [id])
+
+  @@unique([configurationId, categorie, valeur])
+  @@map("facteurs_risque")
+}

@@ -1,0 +1,66 @@
+{
+	"displayName": "Konfirm API - Tests LCB-FT",
+	"preset": "ts-jest",
+	"testEnvironment": "node",
+	"rootDir": ".",
+	"testMatch": [
+		"**/__tests__/**/*.test.ts",
+		"**/?(*.)+(spec|test).ts"
+	],
+	"collectCoverageFrom": [
+		"src/**/*.ts",
+		"!src/**/*.d.ts",
+		"!src/**/index.ts",
+		"!src/app.ts"
+	],
+	"coverageDirectory": "coverage",
+	"coverageReporters": [
+		"text",
+		"lcov",
+		"html"
+	],
+	"moduleNameMapping": {
+		"^@/(.*)$": "<rootDir>/src/$1"
+	},
+	"setupFilesAfterEnv": [
+		"<rootDir>/__tests__/setup.ts"
+	],
+	"testTimeout": 30000,
+	"verbose": true,
+	"bail": false,
+	"projects": [
+		{
+			"displayName": "Unit Tests - Services LCB-FT",
+			"testMatch": [
+				"<rootDir>/__tests__/services/*.test.ts"
+			],
+			"coveragePathIgnorePatterns": [
+				"/node_modules/",
+				"/__tests__/"
+			]
+		},
+		{
+			"displayName": "Integration Tests - API Routes",
+			"testMatch": [
+				"<rootDir>/__tests__/integration/*.test.ts"
+			],
+			"setupFilesAfterEnv": [
+				"<rootDir>/__tests__/setup.ts",
+				"<rootDir>/__tests__/integration-setup.ts"
+			]
+		},
+		{
+			"displayName": "E2E Tests - Workflow Complet",
+			"testMatch": [
+				"<rootDir>/__tests__/e2e/*.test.ts"
+			],
+			"setupFilesAfterEnv": [
+				"<rootDir>/__tests__/setup.ts",
+				"<rootDir>/__tests__/e2e-setup.ts"
+			],
+			"testTimeout": 60000
+		}
+	],
+	"globalSetup": "<rootDir>/__tests__/global-setup.ts",
+	"globalTeardown": "<rootDir>/__tests__/global-teardown.ts"
+}
