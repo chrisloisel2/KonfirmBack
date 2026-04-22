@@ -56,10 +56,17 @@ const updateShopSchema = z.object({
 async function getCompanyOfUser(userId: string): Promise<string> {
 	const user = await prisma.user.findUnique({
 		where: { id: userId },
-		select: { companyId: true },
+		select: { companyId: true, role: true },
 	});
-	if (!user?.companyId) throw new AuthorizationError('Aucune société associée à ce compte');
-	return user.companyId;
+	if (user?.companyId) return user.companyId;
+
+	// Admin sans company : fallback sur la première company de la base
+	if (user?.role === 'ADMIN') {
+		const first = await prisma.company.findFirst({ select: { id: true } });
+		if (first) return first.id;
+	}
+
+	throw new AuthorizationError('Aucune société associée à ce compte');
 }
 
 function zodError(err: z.ZodError): string {
@@ -225,7 +232,7 @@ router.get('/shops', asyncHandler(async (req: AuthenticatedRequest, res: Respons
 	res.json({ success: true, data: shops });
 }));
 
-router.post('/shops', managerOrAdmin, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+router.post('/shops', adminOnly, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
 	const companyId = await getCompanyOfUser(req.user!.id);
 
 	const parsed = createShopSchema.safeParse(req.body);
@@ -252,7 +259,7 @@ router.post('/shops', managerOrAdmin, asyncHandler(async (req: AuthenticatedRequ
 	res.status(201).json({ success: true, data: shop });
 }));
 
-router.put('/shops/:id', managerOrAdmin, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+router.put('/shops/:id', adminOnly, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
 	const companyId = await getCompanyOfUser(req.user!.id);
 
 	const shop = await prisma.shop.findFirst({ where: { id: req.params.id, companyId } });
@@ -277,7 +284,7 @@ router.put('/shops/:id', managerOrAdmin, asyncHandler(async (req: AuthenticatedR
 	res.json({ success: true, data: updated });
 }));
 
-router.delete('/shops/:id', managerOrAdmin, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+router.delete('/shops/:id', adminOnly, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
 	const companyId = await getCompanyOfUser(req.user!.id);
 
 	const shop = await prisma.shop.findFirst({ where: { id: req.params.id, companyId } });

@@ -2,7 +2,6 @@ import { Router, Request, Response } from 'express';
 import prisma from '../../lib/prisma';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
 import {
 	AppError,
@@ -20,17 +19,6 @@ import {
 const router = Router();
 const DEV_ADMIN_EMAIL = (process.env.ADMIN_DEV_EMAIL || 'admin@konfirm.local').toLowerCase();
 const DEV_ADMIN_PASSWORD = process.env.ADMIN_DEV_PASSWORD || 'Konfirm2024!';
-
-// Rate limiting pour l'authentification
-const authRateLimit = rateLimit({
-	windowMs: 15 * 60 * 1000, // 15 minutes
-	max: 5, // 5 tentatives par IP
-	message: {
-		error: 'Trop de tentatives de connexion. Réessayez dans 15 minutes.'
-	},
-	standardHeaders: true,
-	legacyHeaders: false,
-});
 
 // Validation schemas
 const loginSchema = z.object({
@@ -155,41 +143,9 @@ async function checkSubscriptionAccess(userId: string, companyId: string | null 
 	}
 }
 
-async function checkLoginAttempts(user: any): Promise<boolean> {
-	const maxAttempts = 5;
-	const lockoutDuration = 30 * 60 * 1000; // 30 minutes
-
-	if (user.lockedUntil && user.lockedUntil > new Date()) {
-		throw new AuthenticationError('Compte temporairement verrouillé');
-	}
-
-	if (user.loginAttempts >= maxAttempts) {
-		const lockoutTime = new Date(Date.now() + lockoutDuration);
-
-		await prisma.user.update({
-			where: { id: user.id },
-			data: {
-				lockedUntil: lockoutTime,
-				loginAttempts: user.loginAttempts + 1
-			}
-		});
-
-		logSecurityEvent({
-			userId: user.id,
-			action: 'account_locked',
-			details: { attempts: user.loginAttempts + 1 },
-			ipAddress: '',
-			severity: 'warning'
-		});
-
-		throw new AuthenticationError('Compte verrouillé pour 30 minutes');
-	}
-
-	return true;
-}
 
 // POST /api/auth/signup
-router.post('/signup', authRateLimit, asyncHandler(async (req: Request, res: Response) => {
+router.post('/signup', asyncHandler(async (req: Request, res: Response) => {
 	const {
 		email,
 		password,
@@ -339,7 +295,7 @@ router.post('/signup', authRateLimit, asyncHandler(async (req: Request, res: Res
 }));
 
 // POST /api/auth/login
-router.post('/login', authRateLimit, asyncHandler(async (req: Request, res: Response) => {
+router.post('/login', asyncHandler(async (req: Request, res: Response) => {
 	const { email, password } = loginSchema.parse(req.body);
 
 	// Recherche de l'utilisateur
@@ -388,9 +344,6 @@ router.post('/login', authRateLimit, asyncHandler(async (req: Request, res: Resp
 		throw new AuthenticationError('Compte désactivé');
 	}
 
-	// Vérification des tentatives de connexion
-	await checkLoginAttempts(user);
-
 	// Vérification de l'abonnement
 	await checkSubscriptionAccess(user.id, user.companyId);
 
@@ -398,14 +351,6 @@ router.post('/login', authRateLimit, asyncHandler(async (req: Request, res: Resp
 	const isValidPassword = await validatePassword(user, password);
 
 	if (!isValidPassword) {
-		// Incrémenter les tentatives
-		await prisma.user.update({
-			where: { id: user.id },
-			data: {
-				loginAttempts: user.loginAttempts + 1
-			}
-		});
-
 		logAuthEvent({
 			action: 'login_failed',
 			email,
