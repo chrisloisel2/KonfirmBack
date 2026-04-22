@@ -11,6 +11,7 @@ import searchRoutes from './routes/search';
 import watchlistRoutes from './routes/watchlists';
 import intelligenceRoutes from './routes/intelligence';
 import settingsRoutes from './routes/settings';
+import archivageRoutes from './routes/archivage';
 import { authenticateToken } from '../middleware/auth';
 
 const router = Router();
@@ -41,6 +42,7 @@ router.use('/search', searchRoutes);
 router.use('/watchlists', watchlistRoutes);
 router.use('/intelligence', intelligenceRoutes);
 router.use('/settings', auth, settingsRoutes);
+router.use('/archivage', auth, archivageRoutes);
 
 // Route de test d'authentification
 router.get('/protected-test', authenticateToken, (req, res) => {

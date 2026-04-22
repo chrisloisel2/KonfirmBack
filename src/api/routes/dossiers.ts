@@ -17,10 +17,12 @@ import {
 } from '../../middleware/auth';
 import {
 	logDossierEvent,
-	logAuditEvent
+	logAuditEvent,
+	logSystemEvent
 } from '../../utils/logger';
 import { checkSeuilsLcbFt, checkGelAvoirsDGTresor, checkVigilanceConstante } from '../../services/seuilsLcbFtService';
 import TracfinService, { evaluateSuspicion, generateTracfinDeclaration, transmitToErmes, validateDeclaration, getDeclarationHistory } from '../../services/tracfinService';
+import { archiveDossier } from '../../services/archivageService';
 
 const router = Router();
 
@@ -839,6 +841,27 @@ router.patch('/:dossierId',
 			newValues: updatedDossier,
 			ipAddress: req.ip
 		});
+
+		// Archivage LCB-FT automatique sur toute transition vers VALIDE, REJETE ou ARCHIVE
+		const STATUTS_ARCHIVAGE = ['VALIDE', 'REJETE', 'ARCHIVE'];
+		if (
+			validatedData.status &&
+			STATUTS_ARCHIVAGE.includes(validatedData.status) &&
+			!STATUTS_ARCHIVAGE.includes(currentDossier.status)
+		) {
+			archiveDossier(dossierId, userId, validatedData.status).catch((err: unknown) => {
+				logSystemEvent({
+					action: 'security_alert',
+					component: 'archivage_auto',
+					details: {
+						dossierId,
+						triggerStatus: validatedData.status,
+						error: String(err)
+					},
+					severity: 'error'
+				});
+			});
+		}
 
 		res.json({
 			success: true,

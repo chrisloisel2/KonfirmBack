@@ -262,21 +262,22 @@ model Client {
 }
 
 model Dossier {
-  id            String        @id @default(cuid()) @map("_id")
-  numero        String        @unique
-  clientId      String
-  createdById   String
-  assignedToId  String?
-  validatedById String?
-  status        DossierStatus @default(BROUILLON)
-  typeOuverture String
-  montantInitial Float?
-  dateOuverture DateTime?
-  notes         String?
-  validation    Json?
-  scoring       Json?
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
+  id                       String        @id @default(cuid()) @map("_id")
+  numero                   String        @unique
+  clientId                 String
+  createdById              String
+  assignedToId             String?
+  validatedById            String?
+  status                   DossierStatus @default(BROUILLON)
+  typeOuverture            String
+  montantInitial           Float?
+  dateOuverture            DateTime?
+  dateFinRelationAffaires  DateTime?
+  notes                    String?
+  validation               Json?
+  scoring                  Json?
+  createdAt                DateTime      @default(now())
+  updatedAt                DateTime      @updatedAt
 
   client      Client    @relation(fields: [clientId], references: [id])
   createdBy   User      @relation("UserCreatedDossiers", fields: [createdById], references: [id])
@@ -287,8 +288,37 @@ model Dossier {
   exceptions  Exception[]
   auditLogs   AuditLog[]
   tracfinDeclarations TracfinDeclaration[]
+  archivedPdfs            ArchivedPdf[]
 
   @@map("dossiers")
+}
+
+model ArchivedPdf {
+  id                String    @id @default(cuid()) @map("_id")
+  dossierId         String
+  filename          String
+  originalFilename  String
+  filePath          String
+  fileSize          Int
+  sha256Hash        String
+  sealSignature     String
+  sealCertFingerprint String
+  timestampToken    String?
+  timestampTime     DateTime?
+  timestampTsa      String?
+  isPdfa            Boolean   @default(true)
+  retentionExpiry   DateTime
+  isImmutable       Boolean   @default(true)
+  archivedAt        DateTime  @default(now())
+  archivedById      String?
+  triggerStatus     String?
+  metadata          Json?
+
+  dossier Dossier @relation(fields: [dossierId], references: [id])
+
+  @@index([dossierId])
+  @@index([retentionExpiry])
+  @@map("archived_pdfs")
 }
 
 model Document {
