@@ -775,14 +775,19 @@ router.patch('/:dossierId',
 
 		// Vérifications métier
 		if (validatedData.status) {
+			// Transition idempotente : même statut → pas d'erreur, pas de mise à jour
+			if (currentDossier.status === validatedData.status) {
+				return res.json({ success: true, data: currentDossier });
+			}
+
 			// Vérification des transitions de statut autorisées
 			const allowedTransitions: Record<string, string[]> = {
 				'BROUILLON': ['EN_COURS', 'ARCHIVE'],
-				'EN_COURS': ['ATTENTE_VALIDATION', 'BROUILLON', 'ARCHIVE'],
+				'EN_COURS': ['ATTENTE_VALIDATION', 'VALIDE', 'REJETE', 'BROUILLON', 'ARCHIVE'],
 				'ATTENTE_VALIDATION': ['VALIDE', 'REJETE', 'EN_COURS'],
 				'VALIDE': ['ARCHIVE'],
 				'REJETE': ['EN_COURS', 'ARCHIVE'],
-				'ARCHIVE': [] // Pas de transition depuis archive
+				'ARCHIVE': [],
 			};
 
 			if (!allowedTransitions[currentDossier.status]?.includes(validatedData.status)) {
@@ -791,9 +796,10 @@ router.patch('/:dossierId',
 				);
 			}
 
-			// Certains changements de statut nécessitent des rôles spécifiques
+			// VALIDE/REJETE : REFERENT+, ou le créateur du dossier (CAISSE qui a ouvert le dossier)
 			if (['VALIDE', 'REJETE'].includes(validatedData.status) &&
-				!['REFERENT', 'RESPONSABLE', 'ADMIN'].includes(req.user!.role)) {
+				!['REFERENT', 'RESPONSABLE', 'ADMIN'].includes(req.user!.role) &&
+				currentDossier.createdById !== userId) {
 				throw new AuthorizationError('Privilèges insuffisants pour valider/rejeter un dossier');
 			}
 		}

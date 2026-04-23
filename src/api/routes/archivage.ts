@@ -13,7 +13,7 @@ import {
   AuthenticatedRequest
 } from '../../middleware/auth';
 import { logAuditEvent, logSystemEvent } from '../../utils/logger';
-import { archivePdf, archiveDossier, generateCertificatPdf } from '../../services/archivageService';
+import { archivePdf, archiveDossier, generateCertificatPdf, archiveDocumentFile } from '../../services/archivageService';
 import {
   verifyFileIntegrity,
   readWormFile,
@@ -217,10 +217,20 @@ router.get(
 router.get(
   '/:dossierId/:archiveId/telecharger',
   authenticateToken,
-  requireMinimumRole('REFERENT'),
   asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
     const { dossierId, archiveId } = req.params;
     const userId = req.user!.id;
+    const userRole = req.user!.role;
+
+    // REFERENT+ peuvent tout télécharger ; CAISSE/CONSEILLER uniquement leur propre dossier
+    const isElevated = ['REFERENT', 'RESPONSABLE', 'ADMIN'].includes(userRole);
+    if (!isElevated) {
+      const dossier = await prisma.dossier.findFirst({
+        where: { id: dossierId, createdById: userId },
+        select: { id: true },
+      });
+      if (!dossier) throw new AppError('Accès non autorisé à cette archive', 403);
+    }
 
     const archive = await prisma.archivedPdf.findFirst({
       where: { id: archiveId, dossierId }
@@ -318,14 +328,21 @@ router.patch(
       select: { id: true, numero: true, dateFinRelationAffaires: true }
     });
 
-    // Recalcul de la rétention sur toutes les archives du dossier
+    // Recalcul de la rétention sur l'ensemble des archives du dossier
+    // (PDF de conformité + pièces justificatives)
     const retentionExpiry = new Date(date);
     retentionExpiry.setFullYear(retentionExpiry.getFullYear() + 5);
 
-    await prisma.archivedPdf.updateMany({
-      where: { dossierId },
-      data: { retentionExpiry }
-    });
+    await Promise.all([
+      prisma.archivedPdf.updateMany({
+        where: { dossierId },
+        data: { retentionExpiry }
+      }),
+      prisma.archivedDocument.updateMany({
+        where: { dossierId },
+        data: { retentionExpiry }
+      })
+    ]);
 
     logAuditEvent({
       userId,
@@ -392,6 +409,160 @@ router.get(
   })
 );
 
+// ─── GET /api/archivage/:dossierId/documents ──────────────────────────────────
+// Liste les pièces justificatives archivées (WORM) d'un dossier.
+router.get(
+  '/:dossierId/documents',
+  authenticateToken,
+  asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+    const { dossierId } = req.params;
+
+    const dossier = await prisma.dossier.findUnique({
+      where: { id: dossierId },
+      select: { id: true, createdById: true }
+    });
+    if (!dossier) throw new AppError('Dossier introuvable', 404);
+
+    const user = req.user!;
+    const isOwner = dossier.createdById === user.id;
+    const isElevated = ['REFERENT', 'RESPONSABLE', 'ADMIN'].includes(user.role);
+    if (!isOwner && !isElevated) throw new AppError('Accès non autorisé', 403);
+
+    const archivedDocuments = await prisma.archivedDocument.findMany({
+      where: { dossierId },
+      orderBy: { archivedAt: 'desc' },
+      select: {
+        id: true,
+        documentId: true,
+        filename: true,
+        originalFilename: true,
+        fileSize: true,
+        mimeType: true,
+        documentType: true,
+        sha256Hash: true,
+        sealCertFingerprint: true,
+        timestampTime: true,
+        timestampTsa: true,
+        isImmutable: true,
+        retentionExpiry: true,
+        archivedAt: true
+      }
+    });
+
+    logAuditEvent({
+      userId: user.id,
+      action: 'READ',
+      resource: 'archived_documents_list',
+      resourceId: dossierId,
+      metadata: { count: archivedDocuments.length }
+    });
+
+    res.json({
+      success: true,
+      data: {
+        archivedDocuments,
+        total: archivedDocuments.length
+      }
+    });
+  })
+);
+
+// ─── GET /api/archivage/:dossierId/documents/:archiveId/verifier ───────────────
+// Vérifie l'intégrité d'un document archivé (recalcul SHA-256).
+router.get(
+  '/:dossierId/documents/:archiveId/verifier',
+  authenticateToken,
+  requireMinimumRole('REFERENT'),
+  asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+    const { dossierId, archiveId } = req.params;
+    const userId = req.user!.id;
+
+    const archive = await prisma.archivedDocument.findFirst({
+      where: { id: archiveId, dossierId }
+    });
+    if (!archive) throw new AppError('Archive de document introuvable', 404);
+
+    const isValid = await verifyFileIntegrity(archive.filePath, archive.sha256Hash);
+
+    logAuditEvent({
+      userId,
+      action: 'READ',
+      resource: 'archived_document',
+      resourceId: archiveId,
+      metadata: { dossierId, documentType: archive.documentType, integrityCheck: isValid }
+    });
+
+    res.json({
+      success: true,
+      data: {
+        archiveId,
+        dossierId,
+        documentType: archive.documentType,
+        filename: archive.filename,
+        sha256Hash: archive.sha256Hash,
+        integrityValid: isValid,
+        retentionExpiry: archive.retentionExpiry,
+        retentionExpired: isRetentionExpired(archive.retentionExpiry),
+        verifiedAt: new Date().toISOString()
+      }
+    });
+  })
+);
+
+// ─── POST /api/archivage/:dossierId/documents/:documentId/archiver ─────────────
+// Déclenche manuellement l'archivage WORM d'un document existant (idempotent).
+// Utile pour les documents uploadés avant la mise en place du pipeline automatique.
+router.post(
+  '/:dossierId/documents/:documentId/archiver',
+  authenticateToken,
+  requireMinimumRole('REFERENT'),
+  asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+    const { dossierId, documentId } = req.params;
+    const userId = req.user!.id;
+
+    // Vérifier que le document n'est pas déjà archivé
+    const existing = await prisma.archivedDocument.findFirst({
+      where: { documentId }
+    });
+    if (existing) {
+      return res.json({
+        success: true,
+        data: { archiveId: existing.id, message: 'Document déjà archivé' }
+      });
+    }
+
+    const doc = await prisma.document.findFirst({
+      where: { id: documentId, dossierId },
+      include: { dossier: { select: { dateFinRelationAffaires: true } } }
+    });
+    if (!doc) throw new AppError('Document introuvable', 404);
+
+    const result = await archiveDocumentFile({
+      documentId: doc.id,
+      dossierId,
+      sourceFilePath: doc.filePath,
+      originalFilename: doc.originalName,
+      mimeType: doc.mimeType,
+      documentType: doc.type,
+      archivedById: userId,
+      dateFinRelationAffaires: doc.dossier.dateFinRelationAffaires ?? null
+    });
+
+    res.status(201).json({
+      success: true,
+      data: {
+        archiveId: result.archiveId,
+        sha256Hash: result.sha256Hash,
+        sealCertFingerprint: result.sealCertFingerprint,
+        hasTimestamp: !!result.timestampToken,
+        timestampTime: result.timestampTime,
+        retentionExpiry: result.retentionExpiry,
+        archivedAt: result.archivedAt
+      }
+    });
+  })
+);
+
 // ─── GET /api/archivage/stats/worm ────────────────────────────────────────────
 // Statistiques du stockage WORM (ADMIN uniquement).
 router.get(
@@ -399,19 +570,25 @@ router.get(
   authenticateToken,
   requireMinimumRole('ADMIN'),
   asyncHandler(async (_req: AuthenticatedRequest, res: Response) => {
-    const stats = await getWormStorageStats();
-    const dbCount = await prisma.archivedPdf.count();
-    const expiringCount = await prisma.archivedPdf.count({
-      where: { retentionExpiry: { lte: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000) } }
-    });
+    const threshold90d = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
+
+    const [stats, pdfCount, docCount, expiringPdfCount, expiringDocCount] = await Promise.all([
+      getWormStorageStats(),
+      prisma.archivedPdf.count(),
+      prisma.archivedDocument.count(),
+      prisma.archivedPdf.count({ where: { retentionExpiry: { lte: threshold90d } } }),
+      prisma.archivedDocument.count({ where: { retentionExpiry: { lte: threshold90d } } })
+    ]);
 
     res.json({
       success: true,
       data: {
         wormStorage: stats,
         database: {
-          totalArchives: dbCount,
-          expiringWithin90Days: expiringCount
+          totalPdfArchives: pdfCount,
+          totalDocumentArchives: docCount,
+          totalArchives: pdfCount + docCount,
+          expiringWithin90Days: expiringPdfCount + expiringDocCount
         }
       }
     });

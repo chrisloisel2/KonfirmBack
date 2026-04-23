@@ -189,6 +189,8 @@ async function seedActivationKeys() {
       billingCycle: 'MONTHLY',
       priceCents: 9900,
       seats: 5,
+      maxAccounts: 10,
+      maxShops: 3,
     },
     {
       code: 'KONFIRM-BUSINESS-YEARLY-2026',
@@ -197,11 +199,13 @@ async function seedActivationKeys() {
       billingCycle: 'YEARLY',
       priceCents: 79000,
       seats: 25,
+      maxAccounts: 50,
+      maxShops: 10,
     },
   ];
 
   for (const key of keys) {
-    await (prisma as any).activationKey.upsert({
+    await prisma.activationKey.upsert({
       where: { code: key.code },
       update: {},
       create: {
@@ -212,6 +216,8 @@ async function seedActivationKeys() {
         priceCents: key.priceCents,
         currency: 'EUR',
         seats: key.seats,
+        maxAccounts: key.maxAccounts,
+        maxShops: key.maxShops,
         status: 'ACTIVE',
         isRedeemed: false,
       },

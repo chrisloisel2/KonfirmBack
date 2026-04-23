@@ -9,6 +9,7 @@ const router = Router();
 
 const adminOnly = requireMinimumRole('ADMIN');
 const managerOrAdmin = requireMinimumRole('RESPONSABLE');
+const referentOrAbove = requireMinimumRole('REFERENT');
 
 // ─── Validation schemas ───────────────────────────────────────────────────────
 
@@ -25,12 +26,12 @@ const createAccountSchema = z.object({
 	password: z.string().min(8),
 	firstName: z.string().min(1),
 	lastName: z.string().min(1),
-	role: z.enum(['CONSEILLER', 'CAISSE', 'REFERENT', 'RESPONSABLE', 'ADMIN']),
+	role: z.enum(['CAISSE', 'REFERENT', 'RESPONSABLE']),
 	shopIds: z.array(z.string()).optional().default([]),
 });
 
 const updateAccountSchema = z.object({
-	role: z.enum(['CONSEILLER', 'CAISSE', 'REFERENT', 'RESPONSABLE', 'ADMIN']).optional(),
+	role: z.enum(['CAISSE', 'REFERENT', 'RESPONSABLE']).optional(),
 	shopIds: z.array(z.string()).optional(),
 	isActive: z.boolean().optional(),
 	password: z.string().min(8).optional(),
@@ -110,8 +111,24 @@ router.put('/company', managerOrAdmin, asyncHandler(async (req: AuthenticatedReq
 router.get('/accounts', asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
 	const companyId = await getCompanyOfUser(req.user!.id);
 
+	// REFERENT : ne voit que les comptes des boutiques qui lui sont assignées
+	let whereClause: any = { companyId };
+	if (req.user!.role === 'REFERENT') {
+		const referent = await prisma.user.findUnique({
+			where: { id: req.user!.id },
+			select: { shopIds: true },
+		});
+		const myShopIds = referent?.shopIds ?? [];
+		if (myShopIds.length > 0) {
+			whereClause = { companyId, shopIds: { hasSome: myShopIds } };
+		} else {
+			// Référent sans boutique assignée : ne voit aucun compte
+			return res.json({ success: true, data: [] });
+		}
+	}
+
 	const accounts = await prisma.user.findMany({
-		where: { companyId },
+		where: whereClause,
 		select: {
 			id: true,
 			email: true,
@@ -131,11 +148,42 @@ router.get('/accounts', asyncHandler(async (req: AuthenticatedRequest, res: Resp
 	res.json({ success: true, data: accounts });
 }));
 
-router.post('/accounts', managerOrAdmin, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+router.post('/accounts', referentOrAbove, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
 	const companyId = await getCompanyOfUser(req.user!.id);
+	const callerRole = req.user!.role;
 
 	const parsed = createAccountSchema.safeParse(req.body);
 	if (!parsed.success) throw new ValidationError(zodError(parsed.error));
+
+	// REFERENT : ne peut créer que des comptes CAISSE pour ses boutiques
+	if (callerRole === 'REFERENT') {
+		if (parsed.data.role !== 'CAISSE') {
+			throw new AuthorizationError('Un Référent ne peut créer que des comptes Caisse');
+		}
+
+		const referent = await prisma.user.findUnique({
+			where: { id: req.user!.id },
+			select: { shopIds: true },
+		});
+		const myShopIds = referent?.shopIds ?? [];
+
+		if (myShopIds.length === 0) {
+			throw new AuthorizationError('Vous n\'êtes assigné à aucune boutique');
+		}
+
+		// Forcer l'assignation aux boutiques du référent (ou valider le subset fourni)
+		const requestedShops = parsed.data.shopIds.length > 0 ? parsed.data.shopIds : myShopIds;
+		const invalidShops = requestedShops.filter((id: string) => !myShopIds.includes(id));
+		if (invalidShops.length > 0) {
+			throw new AuthorizationError('Vous ne pouvez assigner un compte qu\'aux boutiques dont vous êtes référent');
+		}
+		parsed.data.shopIds = requestedShops;
+	}
+
+	// RESPONSABLE ne peut pas créer d'autres RESPONSABLE
+	if (callerRole === 'RESPONSABLE' && parsed.data.role === 'RESPONSABLE') {
+		throw new AuthorizationError('Un Responsable ne peut pas créer un autre compte Responsable');
+	}
 
 	const subscription = await prisma.subscription.findUnique({ where: { companyId } });
 	const maxAccounts = subscription?.maxAccounts ?? 3;
@@ -178,6 +226,11 @@ router.put('/accounts/:id', managerOrAdmin, asyncHandler(async (req: Authenticat
 
 	const parsed = updateAccountSchema.safeParse(req.body);
 	if (!parsed.success) throw new ValidationError(zodError(parsed.error));
+
+	// RESPONSABLE ne peut pas promouvoir un compte au rang RESPONSABLE
+	if (req.user!.role === 'RESPONSABLE' && parsed.data.role === 'RESPONSABLE') {
+		throw new AuthorizationError('Un Responsable ne peut pas promouvoir un compte au rang Responsable');
+	}
 
 	const updateData: {
 		role?: string;
@@ -232,7 +285,7 @@ router.get('/shops', asyncHandler(async (req: AuthenticatedRequest, res: Respons
 	res.json({ success: true, data: shops });
 }));
 
-router.post('/shops', adminOnly, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+router.post('/shops', managerOrAdmin, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
 	const companyId = await getCompanyOfUser(req.user!.id);
 
 	const parsed = createShopSchema.safeParse(req.body);
@@ -259,7 +312,7 @@ router.post('/shops', adminOnly, asyncHandler(async (req: AuthenticatedRequest, 
 	res.status(201).json({ success: true, data: shop });
 }));
 
-router.put('/shops/:id', adminOnly, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+router.put('/shops/:id', managerOrAdmin, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
 	const companyId = await getCompanyOfUser(req.user!.id);
 
 	const shop = await prisma.shop.findFirst({ where: { id: req.params.id, companyId } });
@@ -284,7 +337,7 @@ router.put('/shops/:id', adminOnly, asyncHandler(async (req: AuthenticatedReques
 	res.json({ success: true, data: updated });
 }));
 
-router.delete('/shops/:id', adminOnly, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+router.delete('/shops/:id', managerOrAdmin, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
 	const companyId = await getCompanyOfUser(req.user!.id);
 
 	const shop = await prisma.shop.findFirst({ where: { id: req.params.id, companyId } });

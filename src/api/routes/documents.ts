@@ -22,6 +22,7 @@ import {
 	logSystemEvent
 } from '../../utils/logger';
 import { extractIdentityData } from '../../services/ocrService';
+import { archiveDocumentFile } from '../../services/archivageService';
 
 const router = Router();
 
@@ -245,7 +246,7 @@ router.post('/dossiers/:dossierId/upload',
 		// Vérification que le dossier existe
 		const dossier = await prisma.dossier.findUnique({
 			where: { id: dossierId },
-			select: { id: true, numero: true }
+			select: { id: true, numero: true, dateFinRelationAffaires: true }
 		});
 
 		if (!dossier) {
@@ -291,6 +292,32 @@ router.post('/dossiers/:dossierId/upload',
 					fileSize: document.fileSize,
 					hasOcrText: !!ocrResult.text,
 					ocrConfidence: ocrResult.metadata.confidence || null
+				});
+
+				// Archivage WORM asynchrone : SHA-256 + cachet électronique +
+				// horodatage RFC 3161 + stockage immuable. Non-bloquant pour la
+				// réponse mais journalisé en cas d'erreur (alerte sécurité).
+				archiveDocumentFile({
+					documentId: document.id,
+					dossierId,
+					sourceFilePath: file.path,
+					originalFilename: file.originalname,
+					mimeType: file.mimetype,
+					documentType: validatedMetadata.type,
+					archivedById: userId,
+					dateFinRelationAffaires: dossier!.dateFinRelationAffaires ?? null
+				}).catch((err) => {
+					logSystemEvent({
+						action: 'security_alert',
+						component: 'archivage_document',
+						details: {
+							documentId: document.id,
+							dossierId,
+							documentType: validatedMetadata.type,
+							error: String(err)
+						},
+						severity: 'error'
+					});
 				});
 
 				logDossierEvent({

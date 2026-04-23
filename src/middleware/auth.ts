@@ -294,12 +294,25 @@ export const requireDossierAccess = async (
 				id: true,
 				createdById: true,
 				assignedToId: true,
-				validatedById: true
+				validatedById: true,
+				createdBy: { select: { shopIds: true } },
 			}
 		});
 
 		if (!dossier) {
 			throw new AuthorizationError('Dossier non trouvé');
+		}
+
+		// REFERENT : accès limité aux dossiers créés par les membres de ses boutiques
+		let referentHasAccess = false;
+		if (req.user.role === 'REFERENT') {
+			const referent = await prisma.user.findUnique({
+				where: { id: req.user.id },
+				select: { shopIds: true },
+			});
+			const myShopIds = referent?.shopIds ?? [];
+			const dossierCreatorShops = (dossier as any).createdBy?.shopIds ?? [];
+			referentHasAccess = myShopIds.some((sid: string) => dossierCreatorShops.includes(sid));
 		}
 
 		const hasAccess = (
@@ -311,8 +324,8 @@ export const requireDossierAccess = async (
 			dossier.validatedById === req.user.id ||
 			// Rôles avec accès complet
 			['RESPONSABLE', 'ADMIN'].includes(req.user.role) ||
-			// Référent peut voir tous les dossiers
-			req.user.role === 'REFERENT'
+			// Référent limité à ses boutiques
+			referentHasAccess
 		);
 
 		if (!hasAccess) {

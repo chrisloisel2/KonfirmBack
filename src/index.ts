@@ -18,6 +18,9 @@ unhandledErrorHandler();
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// Faire confiance au premier proxy (nginx) pour X-Forwarded-For
+app.set('trust proxy', 1);
+
 // Sécurité avec Helmet
 app.use(helmet({
 	contentSecurityPolicy: {

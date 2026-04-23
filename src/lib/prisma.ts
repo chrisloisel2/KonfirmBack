@@ -297,7 +297,8 @@ const MODEL_META: Record<string, ModelMeta> = {
 		defaults: () => ({ isActive: true, userIds: [] }),
 		relations: {
 			company: { type: 'one', model: 'company', localField: 'companyId', foreignField: 'id' },
-			users: { type: 'many', model: 'user', foreignField: 'id', localField: 'userIds' },
+			// Utilise user.shopIds comme source de vérité (pas shop.userIds)
+			users: { type: 'many', model: 'user', localField: 'id', foreignField: 'shopIds' },
 		},
 	},
 	activationKey: {
@@ -361,6 +362,25 @@ const MODEL_META: Record<string, ModelMeta> = {
 		timestamps: { createdAt: 'createdAt', updatedAt: 'updatedAt' },
 		uniqueFields: ['id'],
 		defaults: () => ({ isActive: true }),
+	},
+	archivedPdf: {
+		collection: 'archived_pdfs',
+		timestamps: { createdAt: 'archivedAt', updatedAt: 'archivedAt' },
+		uniqueFields: ['id'],
+		defaults: () => ({ isImmutable: true, isPdfa: false }),
+		relations: {
+			dossier: { type: 'one', model: 'dossier', localField: 'dossierId', foreignField: 'id' },
+		},
+	},
+	archivedDocument: {
+		collection: 'archived_documents',
+		timestamps: { createdAt: 'archivedAt', updatedAt: 'archivedAt' },
+		uniqueFields: ['id', 'documentId'],
+		defaults: () => ({ isImmutable: true }),
+		relations: {
+			dossier: { type: 'one', model: 'dossier', localField: 'dossierId', foreignField: 'id' },
+			document: { type: 'one', model: 'document', localField: 'documentId', foreignField: 'id' },
+		},
 	},
 };
 
@@ -618,12 +638,24 @@ async function findRelatedOne(parentDoc: AnyRecord, relation: RelationMeta, cont
 
 async function findRelatedMany(parentDoc: AnyRecord, relation: RelationMeta, context: QueryContext): Promise<AnyRecord[]> {
 	const docs = await loadDocuments(relation.model, context);
+
 	if (relation.localField === 'id' && relation.foreignField) {
-		return docs.filter((doc: AnyRecord) => doc[relation.foreignField as string] === parentDoc.id);
+		// one→many : trouver les docs dont foreignField contient/égale parentDoc.id
+		return docs.filter((doc: AnyRecord) => {
+			const fv = doc[relation.foreignField as string];
+			return Array.isArray(fv) ? fv.includes(parentDoc.id) : fv === parentDoc.id;
+		});
 	}
+
 	if (relation.localField && relation.foreignField === 'id') {
-		return docs.filter((doc: AnyRecord) => doc.id === parentDoc[relation.localField as string]);
+		// join par tableau : trouver les docs dont l'id est dans parentDoc.localField
+		const localValue = parentDoc[relation.localField as string];
+		if (Array.isArray(localValue)) {
+			return docs.filter((doc: AnyRecord) => (localValue as string[]).includes(doc.id));
+		}
+		return docs.filter((doc: AnyRecord) => doc.id === localValue);
 	}
+
 	return [];
 }
 

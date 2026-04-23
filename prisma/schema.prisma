@@ -13,6 +13,7 @@ datasource db {
 
 enum SubscriptionPlan {
   STARTER
+  PRO
   BUSINESS
   ENTERPRISE
 }
@@ -22,6 +23,8 @@ enum SubscriptionStatus {
   ACTIVE
   EXPIRED
   SUSPENDED
+  PAST_DUE
+  CANCELLED
 }
 
 enum UserRole {
@@ -159,6 +162,9 @@ model User {
   watchlists          Watchlist[]
   intelligenceReports IntelligenceReport[]
   batchSearches       BatchSearch[]
+  ownedSubscriptions  Subscription[]      @relation("SubscriptionOwner")
+  payments            Payment[]           @relation("PaymentUser")
+  redeemedKeys        ActivationKey[]     @relation("ActivationKeyRedeemedBy")
 
   @@map("users")
 }
@@ -190,10 +196,24 @@ model Subscription {
   features    String[]           @default([])
   startDate   DateTime           @default(now())
   expiresAt   DateTime?
-  createdAt   DateTime           @default(now())
-  updatedAt   DateTime           @updatedAt
 
-  company Company @relation(fields: [companyId], references: [id])
+  // Champs billing (dashboard admin)
+  companyName        String?
+  billingCycle       String    @default("MONTHLY")
+  priceCents         Int       @default(0)
+  currency           String    @default("EUR")
+  seats              Int       @default(1)
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+  cancelledAt        DateTime?
+  ownerId            String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company  Company   @relation(fields: [companyId], references: [id])
+  owner    User?     @relation("SubscriptionOwner", fields: [ownerId], references: [id])
+  payments Payment[]
 
   @@map("subscriptions")
 }
@@ -283,12 +303,13 @@ model Dossier {
   createdBy   User      @relation("UserCreatedDossiers", fields: [createdById], references: [id])
   assignedTo  User?     @relation("UserAssignedDossiers", fields: [assignedToId], references: [id])
   validatedBy User?     @relation("UserValidatedDossiers", fields: [validatedById], references: [id])
-  documents   Document[]
-  recherches  Recherche[]
-  exceptions  Exception[]
-  auditLogs   AuditLog[]
+  documents           Document[]
+  recherches          Recherche[]
+  exceptions          Exception[]
+  auditLogs           AuditLog[]
   tracfinDeclarations TracfinDeclaration[]
-  archivedPdfs            ArchivedPdf[]
+  archivedPdfs        ArchivedPdf[]
+  archivedDocuments   ArchivedDocument[]
 
   @@map("dossiers")
 }
@@ -340,10 +361,46 @@ model Document {
   createdAt    DateTime     @default(now())
   updatedAt    DateTime     @updatedAt
 
-  dossier    Dossier @relation(fields: [dossierId], references: [id])
-  uploadedBy User    @relation(fields: [uploadedById], references: [id])
+  dossier          Dossier           @relation(fields: [dossierId], references: [id])
+  uploadedBy       User              @relation(fields: [uploadedById], references: [id])
+  archivedDocument ArchivedDocument?
 
   @@map("documents")
+}
+
+// ─── Archivage WORM des pièces justificatives ─────────────────────────────────
+// Chaque document associé à un dossier est archivé avec SHA-256, cachet
+// électronique RSA-SHA256, horodatage RFC 3161 et stockage WORM immuable.
+// Art. L. 561-12 CMF — conservation 5 ans à compter de la cessation de la
+// relation d'affaires (rétention dynamique pilotée par dateFinRelationAffaires).
+model ArchivedDocument {
+  id                  String    @id @default(cuid()) @map("_id")
+  documentId          String    @unique
+  dossierId           String
+  filename            String
+  originalFilename    String
+  filePath            String
+  fileSize            Int
+  mimeType            String
+  documentType        String
+  sha256Hash          String
+  sealSignature       String
+  sealCertFingerprint String
+  timestampToken      String?
+  timestampTime       DateTime?
+  timestampTsa        String?
+  isImmutable         Boolean   @default(true)
+  retentionExpiry     DateTime
+  archivedAt          DateTime  @default(now())
+  archivedById        String?
+  metadata            Json?
+
+  document Document @relation(fields: [documentId], references: [id])
+  dossier  Dossier  @relation(fields: [dossierId], references: [id])
+
+  @@index([dossierId])
+  @@index([retentionExpiry])
+  @@map("archived_documents")
 }
 
 model Recherche {
@@ -623,6 +680,54 @@ model BatchSearchResult {
   batch BatchSearch @relation(fields: [batchId], references: [id])
 
   @@map("batch_search_results")
+}
+
+// ─── Billing ─────────────────────────────────────────────────────────────────
+
+model Payment {
+  id             String    @id @default(cuid()) @map("_id")
+  userId         String
+  subscriptionId String?
+  reference      String    @unique
+  amountCents    Int       @default(0)
+  currency       String    @default("EUR")
+  status         String    @default("PENDING")
+  method         String
+  description    String?
+  paidAt         DateTime?
+  verifiedAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  user         User          @relation("PaymentUser", fields: [userId], references: [id])
+  subscription Subscription? @relation(fields: [subscriptionId], references: [id])
+
+  @@map("payments")
+}
+
+model ActivationKey {
+  id               String    @id @default(cuid()) @map("_id")
+  code             String    @unique
+  label            String?
+  plan             String    @default("PRO")
+  billingCycle     String    @default("MONTHLY")
+  priceCents       Int       @default(9900)
+  currency         String    @default("EUR")
+  seats            Int       @default(1)
+  maxAccounts      Int       @default(10)
+  maxShops         Int       @default(2)
+  status           String    @default("ACTIVE")
+  isRedeemed       Boolean   @default(false)
+  redeemedAt       DateTime?
+  redeemedByUserId String?
+  redeemedByEmail  String?
+  expiresAt        DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  redeemedByUser User? @relation("ActivationKeyRedeemedBy", fields: [redeemedByUserId], references: [id])
+
+  @@map("activation_keys")
 }
 
 // ─── Configuration Scoring (KPI + config dashboard) ──────────────────────────

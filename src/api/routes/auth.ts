@@ -127,8 +127,8 @@ async function checkSubscriptionAccess(userId: string, companyId: string | null 
 			select: { status: true },
 		});
 	} else {
-		subscription = await (prisma as any).subscription.findFirst({
-			where: { userId },
+		subscription = await prisma.subscription.findFirst({
+			where: { ownerId: userId },
 			select: { status: true },
 		});
 	}
@@ -167,7 +167,7 @@ router.post('/signup', asyncHandler(async (req: Request, res: Response) => {
 		throw new ValidationError('Un compte existe déjà avec cet email');
 	}
 
-	const keyRecord = await (prisma as any).activationKey.findUnique({
+	const keyRecord = await prisma.activationKey.findUnique({
 		where: { code: normalizedActivationKey },
 		select: {
 			id: true,
@@ -180,6 +180,8 @@ router.post('/signup', asyncHandler(async (req: Request, res: Response) => {
 			priceCents: true,
 			currency: true,
 			seats: true,
+			maxAccounts: true,
+			maxShops: true,
 		}
 	});
 
@@ -198,6 +200,9 @@ router.post('/signup', asyncHandler(async (req: Request, res: Response) => {
 	const saltRounds = parseInt(process.env.BCRYPT_ROUNDS || '12');
 	const passwordHash = await bcrypt.hash(password, saltRounds);
 
+	// Créer la company d'abord
+	const company = await prisma.company.create({ data: { name: companyName.trim() } });
+
 	const user = await prisma.user.create({
 		data: {
 			email: normalizedEmail,
@@ -209,7 +214,7 @@ router.post('/signup', asyncHandler(async (req: Request, res: Response) => {
 			isBlocked: false,
 			loginAttempts: 0,
 			lastLogin: new Date(),
-			companyName,
+			companyId: company.id,
 		},
 		select: {
 			id: true,
@@ -218,27 +223,30 @@ router.post('/signup', asyncHandler(async (req: Request, res: Response) => {
 			lastName: true,
 			role: true,
 			lastLogin: true,
-			companyName: true,
 		}
 	});
 
-	const subscription = await (prisma as any).subscription.create({
+	const periodEnd = buildSubscriptionEndDate(keyRecord.billingCycle || 'MONTHLY');
+	const subscription = await prisma.subscription.create({
 		data: {
-			userId: user.id,
-			activationKeyId: keyRecord.id,
-			companyName,
-			plan: keyRecord.plan || 'PRO',
+			companyId: company.id,
+			ownerId: user.id,
+			companyName: companyName.trim(),
+			plan: (keyRecord.plan || 'PRO').toUpperCase() as any,
 			billingCycle: keyRecord.billingCycle || 'MONTHLY',
 			status: 'ACTIVE',
 			priceCents: keyRecord.priceCents || 9900,
 			currency: keyRecord.currency || 'EUR',
 			seats: keyRecord.seats || 1,
+			maxAccounts: keyRecord.maxAccounts || 10,
+			maxShops: keyRecord.maxShops || 2,
 			currentPeriodStart: new Date(),
-			currentPeriodEnd: buildSubscriptionEndDate(keyRecord.billingCycle || 'MONTHLY'),
+			currentPeriodEnd: periodEnd,
+			expiresAt: periodEnd,
 		}
 	});
 
-	await (prisma as any).payment.create({
+	await prisma.payment.create({
 		data: {
 			userId: user.id,
 			subscriptionId: subscription.id,
@@ -252,7 +260,7 @@ router.post('/signup', asyncHandler(async (req: Request, res: Response) => {
 		}
 	});
 
-	await (prisma as any).activationKey.update({
+	await prisma.activationKey.update({
 		where: { id: keyRecord.id },
 		data: {
 			isRedeemed: true,

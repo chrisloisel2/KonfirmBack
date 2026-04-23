@@ -4,6 +4,7 @@ import { asyncHandler, ValidationError } from '../../middleware/errorHandler';
 import { authenticateToken, AuthenticatedRequest } from '../../middleware/auth';
 import { verifyIdentity } from '../../services/identityVerificationService';
 import { logAuditEvent } from '../../utils/logger';
+import prisma from '../../lib/prisma';
 
 const router = Router();
 
@@ -43,6 +44,35 @@ router.post('/identity',
       ipAddress:  req.ip,
       metadata:   { docType: input.docType, checksRun: results.length },
     });
+
+    // Persistance des résultats dans dossier.validation pour le PDF et l'archivage
+    if (input.dossierId) {
+      try {
+        const current = await prisma.dossier.findUnique({
+          where: { id: input.dossierId },
+          select: { validation: true },
+        });
+        const existing = (current?.validation as Record<string, any>) ?? {};
+        await prisma.dossier.update({
+          where: { id: input.dossierId },
+          data: {
+            validation: {
+              ...existing,
+              verificationResults: results,
+              verificationSummary: {
+                total:     results.length,
+                alerts:    alertCount,
+                warnings:  warningCount,
+                riskLevel: alertCount > 0 ? 'high' : warningCount > 0 ? 'medium' : 'low',
+                runAt:     new Date().toISOString(),
+              },
+            } as any,
+          },
+        });
+      } catch {
+        // Non bloquant : la vérification est retournée au client même si la persistance échoue
+      }
+    }
 
     res.json({
       success: true,
