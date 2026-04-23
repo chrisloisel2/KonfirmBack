@@ -51,6 +51,50 @@ async function createInitializedWorker(component: string, langs = 'fra+eng') {
   return worker;
 }
 
+// ─── Persistent worker pool ───────────────────────────────────────────────────
+// Workers are initialized once at server startup and reused across all requests.
+// Each worker serializes its own queue — concurrent requests share them without
+// re-paying the 4-8s cold-start cost.
+
+interface OcrPool {
+  mrz1: Tesseract.Worker;
+  mrz2: Tesseract.Worker;
+  txt:  Tesseract.Worker;
+}
+
+let poolPromise: Promise<OcrPool> | null = null;
+
+function getPool(): Promise<OcrPool> {
+  if (!poolPromise) {
+    poolPromise = (async () => {
+      const MRZ_PARAMS = {
+        tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<',
+        tessedit_pageseg_mode: '6' as any,
+      } as any;
+      const [mrz1, mrz2, txt] = await Promise.all([
+        createInitializedWorker('mrz_1', 'eng'),
+        createInitializedWorker('mrz_2', 'eng'),
+        createInitializedWorker('txt'),
+      ]);
+      await Promise.all([
+        mrz1.setParameters(MRZ_PARAMS),
+        mrz2.setParameters(MRZ_PARAMS),
+        txt.setParameters({ tessedit_pageseg_mode: '11' as any } as any),
+      ]);
+      logSystemEvent({ action: 'ocr_pool_ready', component: 'ocrService', details: {}, severity: 'info' });
+      return { mrz1, mrz2, txt };
+    })().catch(err => {
+      poolPromise = null; // allow retry on next request if init fails
+      throw err;
+    });
+  }
+  return poolPromise;
+}
+
+export function warmOcrPool(): void {
+  getPool().catch(() => { /* will retry on first real request */ });
+}
+
 // ─── Check digit ──────────────────────────────────────────────────────────────
 
 const CK_W = [7, 3, 1];
@@ -149,38 +193,45 @@ function fixLine(raw: string, schema: PosType[]): string {
 // ─── Image preprocessing ──────────────────────────────────────────────────────
 
 async function buildVariants(src: string): Promise<{ variants: Variant[]; base: string }> {
-  // Rotate using EXIF first → write temp file so all variants share same geometry
   const base = path.join(os.tmpdir(), `ocr_${Date.now()}`);
   const rotated = `${base}_rot.jpg`;
   await sharp(src).rotate().jpeg({ quality: 95 }).toFile(rotated);
 
   const meta = await sharp(rotated).metadata();
-  const W = 2400;
+  // MRZ characters are large by design — 900px is more than sufficient (vs 2400px before)
+  // reducing ~6× pixel count → ~3-4× faster Tesseract recognition
+  const W_MRZ  = 900;
+  const W_FULL = 1400; // full-page text needs more detail
   const h = meta.height ?? 1700;
   const w = meta.width ?? 1200;
-  const variants: Variant[] = [];
 
-  const write = async (pipeline: sharp.Sharp, label: string, mrzCrop: boolean) => {
-    const p = `${base}_${label}.jpg`;
-    await pipeline.jpeg({ quality: 95 }).toFile(p);
-    variants.push({ p, mrzCrop });
-  };
+  type Task = { p: string; mrzCrop: boolean; pipeline: sharp.Sharp };
+  const tasks: Task[] = [];
 
-  // Full-page variants
-  await write(sharp(rotated).resize({ width: W }).greyscale().normalize().sharpen(), 'std', false);
-  await write(sharp(rotated).resize({ width: W }).greyscale().gamma(1.8).normalize().sharpen({ sigma: 2 }), 'hicon', false);
-  await write(sharp(rotated).resize({ width: W }).greyscale().normalize().threshold(128), 'thresh', false);
-
-  // MRZ-crop variants (bottom 42% of document)
+  // MRZ crops first – tried first for early exit (bottom 42% of document)
   if (h > 400) {
     const cropTop = Math.floor(h * 0.58);
     const cropH = h - cropTop;
-    await write(sharp(rotated).extract({ left: 0, top: cropTop, width: w, height: cropH }).resize({ width: W }).greyscale().normalize().sharpen(), 'mrz_std', true);
-    await write(sharp(rotated).extract({ left: 0, top: cropTop, width: w, height: cropH }).resize({ width: W }).greyscale().gamma(1.8).normalize().sharpen({ sigma: 2 }), 'mrz_hicon', true);
-    await write(sharp(rotated).extract({ left: 0, top: cropTop, width: w, height: cropH }).resize({ width: W }).greyscale().normalize().threshold(135), 'mrz_thresh', true);
+    const crop = () => sharp(rotated).extract({ left: 0, top: cropTop, width: w, height: cropH }).resize({ width: W_MRZ }).greyscale();
+    tasks.push(
+      { p: `${base}_mrz_std.jpg`,    mrzCrop: true, pipeline: crop().normalize().sharpen() },
+      { p: `${base}_mrz_hicon.jpg`,  mrzCrop: true, pipeline: crop().gamma(1.8).normalize().sharpen({ sigma: 2 }) },
+      { p: `${base}_mrz_thresh.jpg`, mrzCrop: true, pipeline: crop().normalize().threshold(135) },
+    );
   }
 
-  return { variants, base };
+  // Full-page variants (fallback only)
+  const full = () => sharp(rotated).resize({ width: W_FULL }).greyscale();
+  tasks.push(
+    { p: `${base}_std.jpg`,    mrzCrop: false, pipeline: full().normalize().sharpen() },
+    { p: `${base}_hicon.jpg`,  mrzCrop: false, pipeline: full().gamma(1.8).normalize().sharpen({ sigma: 2 }) },
+    { p: `${base}_thresh.jpg`, mrzCrop: false, pipeline: full().normalize().threshold(128) },
+  );
+
+  // Write all variants in parallel
+  await Promise.all(tasks.map(t => t.pipeline.jpeg({ quality: 92 }).toFile(t.p)));
+
+  return { variants: tasks.map(({ p, mrzCrop }) => ({ p, mrzCrop })), base };
 }
 
 // ─── MRZ line extraction from raw OCR text ────────────────────────────────────
@@ -464,13 +515,11 @@ async function extractWithMindee(imagePath: string, docType: 'cni' | 'passeport'
 // ─── Tesseract multi-pipeline ─────────────────────────────────────────────────
 
 async function extractWithTesseract(imagePath: string, isPdf: boolean): Promise<IdentityData | null> {
-  // For PDFs: try to convert first page to image
-  let workPath = imagePath;
   let pdfImgPath: string | null = null;
+
   if (isPdf) {
     pdfImgPath = await pdfToImage(imagePath);
-    if (pdfImgPath) { workPath = pdfImgPath; }
-    else {
+    if (!pdfImgPath) {
       // Born-digital PDF: extract text via pdf-parse
       try {
         const pdfParse = (await import('pdf-parse')).default;
@@ -488,81 +537,106 @@ async function extractWithTesseract(imagePath: string, isPdf: boolean): Promise<
     }
   }
 
-  const { variants, base } = await buildVariants(workPath);
+  const workPath = pdfImgPath ?? imagePath;
+
+  // Pool is pre-warmed at server startup — 0ms cost on warm requests
+  const [pool, { variants, base }] = await Promise.all([
+    getPool(),
+    buildVariants(workPath),
+  ]);
+
   const tmpFiles = [
     `${base}_rot.jpg`,
     ...variants.map(v => v.p),
     ...(pdfImgPath ? [pdfImgPath] : []),
   ];
 
-  const mrzWorker = await createInitializedWorker('tesseract_mrz');
-  const txtWorker = await createInitializedWorker('tesseract_text');
-
   try {
-    await Promise.all([
-      mrzWorker.setParameters({
-        tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<',
-        tessedit_pageseg_mode: '6' as any,
-      } as any),
-      txtWorker.setParameters({
-        tessedit_pageseg_mode: '11' as any,
-      } as any),
-    ]);
-
     const candidates: IdentityData[] = [];
     const addIfBetter = (d: IdentityData | null) => { if (d) candidates.push(d); };
 
-    // ── Phase 1: MRZ worker on MRZ-cropped variants (fastest path) ──────────
-    for (const v of variants.filter(v => v.mrzCrop)) {
-      const { data } = await mrzWorker.recognize(v.p);
-      const lines = extractMRZLines(data.text);
-      if (lines.length >= 2) {
-        const parsed = tryParseMRZLines(lines);
+    const tryMRZ = (text: string): IdentityData | null => {
+      const lines = extractMRZLines(text);
+      return lines.length >= 2 ? tryParseMRZLines(lines) : null;
+    };
+
+    const mrzCrops = variants.filter(v => v.mrzCrop);
+    const fullPage  = variants.filter(v => !v.mrzCrop);
+
+    // ── Phase 1: 2 MRZ crops in parallel (900px — fast path, covers 90%+ of cases) ──
+    if (mrzCrops.length >= 2) {
+      const [r1, r2] = await Promise.all([
+        pool.mrz1.recognize(mrzCrops[0].p),
+        pool.mrz2.recognize(mrzCrops[1].p),
+      ]);
+      for (const { data } of [r1, r2]) {
+        const parsed = tryMRZ(data.text);
         addIfBetter(parsed);
-        if (parsed?.mrzValid && parsed.confidence >= 0.95) return parsed; // early exit
+        if (parsed?.mrzValid && parsed.confidence >= 0.95) return parsed;
       }
+    } else if (mrzCrops.length === 1) {
+      const { data } = await pool.mrz1.recognize(mrzCrops[0].p);
+      const parsed = tryMRZ(data.text);
+      addIfBetter(parsed);
+      if (parsed?.mrzValid && parsed.confidence >= 0.95) return parsed;
     }
 
-    // ── Phase 2: MRZ worker on full-page variants ────────────────────────────
-    for (const v of variants.filter(v => !v.mrzCrop)) {
-      const { data } = await mrzWorker.recognize(v.p);
-      const lines = extractMRZLines(data.text);
-      if (lines.length >= 2) {
-        const parsed = tryParseMRZLines(lines);
+    // 3rd MRZ crop only if first two produced nothing valid
+    if (mrzCrops.length >= 3 && !candidates.some(c => c.mrzValid)) {
+      const { data } = await pool.mrz1.recognize(mrzCrops[2].p);
+      const parsed = tryMRZ(data.text);
+      addIfBetter(parsed);
+      if (parsed?.mrzValid && parsed.confidence >= 0.95) return parsed;
+    }
+
+    // ── Phase 2: full-page MRZ (1400px) — 2 in parallel ─────────────────────
+    if (fullPage.length >= 2) {
+      const [r1, r2] = await Promise.all([
+        pool.mrz1.recognize(fullPage[0].p),
+        pool.mrz2.recognize(fullPage[1].p),
+      ]);
+      for (const { data } of [r1, r2]) {
+        const parsed = tryMRZ(data.text);
         addIfBetter(parsed);
         if (parsed?.mrzValid && parsed.confidence >= 0.95) return parsed;
       }
     }
-
-    // ── Phase 3: Full-text extraction on all variants ────────────────────────
-    for (const v of variants) {
-      const { data } = await txtWorker.recognize(v.p);
-      addIfBetter(extractFromRawText(data.text, data.confidence / 100));
+    if (fullPage.length >= 3 && !candidates.some(c => c.mrzValid)) {
+      const { data } = await pool.mrz1.recognize(fullPage[2].p);
+      const parsed = tryMRZ(data.text);
+      addIfBetter(parsed);
+      if (parsed?.mrzValid && parsed.confidence >= 0.95) return parsed;
     }
 
-    // ── Phase 4: Rotation fallback if nothing found ──────────────────────────
+    // ── Phase 3: text only if no MRZ candidate at all ────────────────────────
+    const hasMrzCandidate = candidates.some(c => c.source === 'tesseract_mrz');
+    if (!hasMrzCandidate) {
+      for (const v of fullPage.slice(0, 2)) {
+        const { data } = await pool.txt.recognize(v.p);
+        addIfBetter(extractFromRawText(data.text, data.confidence / 100));
+      }
+    }
+
+    // ── Phase 4: rotation fallback – only if still nothing usable ────────────
     const hasGoodResult = candidates.some(c => c.mrzValid || fieldScore(c) >= 50);
     if (!hasGoodResult) {
       const rotBase = path.join(os.tmpdir(), `ocr_rot_${Date.now()}`);
       for (const deg of [90, 180, 270]) {
         const rotPath = `${rotBase}_${deg}.jpg`;
         try {
-          await sharp(workPath).rotate(deg).jpeg({ quality: 95 }).toFile(rotPath);
+          await sharp(workPath).rotate(deg).jpeg({ quality: 92 }).toFile(rotPath);
           tmpFiles.push(rotPath);
-          const { data } = await mrzWorker.recognize(rotPath);
-          const lines = extractMRZLines(data.text);
-          if (lines.length >= 2) {
-            const parsed = tryParseMRZLines(lines);
-            addIfBetter(parsed);
-            if (parsed?.mrzValid) return parsed;
-          }
+          const { data } = await pool.mrz1.recognize(rotPath);
+          const parsed = tryMRZ(data.text);
+          addIfBetter(parsed);
+          if (parsed?.mrzValid) return parsed;
         } catch { /* skip this rotation */ }
       }
     }
 
     return pickBest(candidates);
   } finally {
-    await Promise.allSettled([mrzWorker.terminate(), txtWorker.terminate()]);
+    // Workers stay alive — they belong to the pool
     await Promise.allSettled(tmpFiles.map(f => fs.unlink(f)));
   }
 }

@@ -8,6 +8,7 @@ import dotenv from 'dotenv';
 import logger, { logSystemEvent } from './utils/logger';
 import errorHandler, { unhandledErrorHandler } from './middleware/errorHandler';
 import apiRoutes from './api';
+import { warmOcrPool } from './services/ocrService';
 
 // Charger les variables d'environnement
 dotenv.config();
@@ -147,6 +148,8 @@ const server = app.listen(PORT, () => {
 	});
 
 	logger.info(`🚀 Serveur Konfirm LCB-FT démarré sur le port ${PORT}`);
+	// Pre-warm Tesseract worker pool so the first OCR request doesn't pay the init cost
+	warmOcrPool();
 	logger.info(`🌍 Environnement: ${process.env.NODE_ENV || 'development'}`);
 	logger.info(`📋 Health check: http://localhost:${PORT}/api/health`);
 	logger.info(`🔒 Authentication: http://localhost:${PORT}/api/auth`);
