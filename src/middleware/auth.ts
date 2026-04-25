@@ -315,18 +315,23 @@ export const requireDossierAccess = async (
 			referentHasAccess = myShopIds.some((sid: string) => dossierCreatorShops.includes(sid));
 		}
 
-		const hasAccess = (
-			// Créateur du dossier
-			dossier.createdById === req.user.id ||
-			// Assigné au dossier
-			dossier.assignedToId === req.user.id ||
-			// Validateur du dossier
-			dossier.validatedById === req.user.id ||
-			// Rôles avec accès complet
-			['RESPONSABLE', 'ADMIN'].includes(req.user.role) ||
-			// Référent limité à ses boutiques
-			referentHasAccess
-		);
+		// La caisse ne peut accéder qu'aux dossiers qu'elle a créés
+		const isCaisse = req.user.role === 'CAISSE';
+
+		const hasAccess = isCaisse
+			? dossier.createdById === req.user.id
+			: (
+				// Créateur du dossier
+				dossier.createdById === req.user.id ||
+				// Assigné au dossier
+				dossier.assignedToId === req.user.id ||
+				// Validateur du dossier
+				dossier.validatedById === req.user.id ||
+				// Rôles avec accès complet
+				['RESPONSABLE', 'ADMIN'].includes(req.user.role) ||
+				// Référent limité à ses boutiques
+				referentHasAccess
+			);
 
 		if (!hasAccess) {
 			logSecurityEvent({

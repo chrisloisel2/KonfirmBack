@@ -451,8 +451,11 @@ router.get('/',
 		let whereClause: any = {};
 
 		// Filtrage par rôle
-		if (userRole === 'CONSEILLER' || userRole === 'CAISSE') {
-			// Peut voir seulement ses propres dossiers ou ceux qui lui sont assignés
+		if (userRole === 'CAISSE') {
+			// La caisse ne voit strictement que les dossiers qu'elle a créés
+			whereClause.createdById = userId;
+		} else if (userRole === 'CONSEILLER') {
+			// Le conseiller voit ses propres dossiers ou ceux qui lui sont assignés
 			whereClause.OR = [
 				{ createdById: userId },
 				{ assignedToId: userId }
@@ -460,16 +463,19 @@ router.get('/',
 		}
 		// REFERENT, RESPONSABLE et ADMIN peuvent voir tous les dossiers
 
-		// Filtres additionnels
+		// Les brouillons ne sont jamais affichés dans la liste
+		whereClause.status = { not: 'BROUILLON' };
+
+		// Filtres additionnels (ignorés pour CAISSE — ils ne peuvent pas sortir de leur périmètre)
 		if (params.status) {
-			whereClause.status = params.status;
+			whereClause.status = params.status !== 'BROUILLON' ? params.status : { not: 'BROUILLON' };
 		}
 
-		if (params.assignedToId) {
+		if (params.assignedToId && userRole !== 'CAISSE') {
 			whereClause.assignedToId = params.assignedToId;
 		}
 
-		if (params.createdById) {
+		if (params.createdById && userRole !== 'CAISSE') {
 			whereClause.createdById = params.createdById;
 		}
 
